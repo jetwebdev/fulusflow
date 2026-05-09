@@ -1,0 +1,126 @@
+import { NextRequest } from "next/server";
+
+function requireEnv(name: string): string {
+  const value = process.env[name];
+  if (!value) {
+    throw new Error(`Missing env var: ${name}`);
+  }
+  return value;
+}
+
+const STRIPE_SECRET_KEY = requireEnv("STRIPE_SECRET_KEY");
+
+const ASSET_CONFIG = {
+  ETH: {
+    destinationCurrency: "eth",
+    destinationNetwork: "ethereum",
+  },
+  MATIC: {
+    destinationCurrency: "matic",
+    destinationNetwork: "polygon",
+  },
+} as const;
+
+function getClientIp(request: NextRequest) {
+  const forwarded = request.headers.get("x-forwarded-for");
+  if (forwarded) {
+    return forwarded.split(",")[0].trim();
+  }
+
+  const realIp = request.headers.get("x-real-ip");
+  if (realIp) {
+    return realIp.trim();
+  }
+
+  return "127.0.0.1";
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const body = await request.json();
+
+    const amount = Number(body.amount);
+    const email = String(body.email ?? "");
+    const wallet = String(body.wallet ?? "");
+    const asset = String(body.asset ?? "ETH") as keyof typeof ASSET_CONFIG;
+
+    if (!amount || amount < 10) {
+      return Response.json(
+        { ok: false, error: "Minimum amount is $10." },
+        { status: 400 }
+      );
+    }
+
+    if (!email.includes("@")) {
+      return Response.json(
+        { ok: false, error: "Enter a valid email address." },
+        { status: 400 }
+      );
+    }
+
+    if (!wallet || wallet.length < 24) {
+      return Response.json(
+        { ok: false, error: "Enter a valid wallet address." },
+        { status: 400 }
+      );
+    }
+
+    if (!ASSET_CONFIG[asset]) {
+      return Response.json(
+        { ok: false, error: "Unsupported asset." },
+        { status: 400 }
+      );
+    }
+
+    const config = ASSET_CONFIG[asset];
+ 
+
+    const formData = new URLSearchParams();
+    formData.append("transaction_details[destination_currency]", config.destinationCurrency);
+    formData.append("transaction_details[destination_network]", config.destinationNetwork);
+    formData.append("transaction_details[source_exchange_amount]", amount.toFixed(2));
+    formData.append("wallet_addresses[ethereum]", wallet);
+    formData.append("customer_information[email]", email);
+
+    const stripeResponse = await fetch(
+      "https://api.stripe.com/v1/crypto/onramp_sessions",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${STRIPE_SECRET_KEY}`,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: formData.toString(),
+        cache: "no-store",
+      }
+    );
+
+    const data = await stripeResponse.json();
+
+    if (!stripeResponse.ok) {
+      return Response.json(
+        {
+          ok: false,
+          error: data?.error?.message || "Unable to create Stripe onramp session.",
+          stripe: data,
+        },
+        { status: stripeResponse.status }
+      );
+    }
+
+    return Response.json({
+      ok: true,
+      clientSecret: data.client_secret,
+      sessionId: data.id,
+      session: data,
+    });
+  } catch (error) {
+    return Response.json(
+      {
+        ok: false,
+        error: error instanceof Error ? error.message : "Unknown error",
+      },
+      { status: 500 }
+    );
+  }
+}
